@@ -1,0 +1,206 @@
+component toolchanger "A component to control everything linked to the toolchanger";
+
+// position feedback loop
+enum state_pos_feed_loop {
+        UNDEFINED = 0,
+        CLOSED = 1,
+        OPENED = 2,
+        TIMEOUT_FAULT = 3,
+        SENSOR_FAULT = 4
+    };
+
+pin in bit ini_up;
+pin in bit ini_down;
+pin in bit machine_is_on;
+pin in bit fault_reset;
+
+
+pin out signed status;
+pin out bit fault_pos;
+
+variable int counter_pos_feed_loop = 0;
+
+
+
+variable int current_state_pos_feed_loop = UNDEFINED "current state of position-feedback-loop";
+variable int last_state_pos_feed_loop = UNDEFINED "last state of position-feedback-loop";
+
+// actuation loop
+enum state_actuation_loop {
+        IDLE = 0,
+        CLOSE = 1,
+        OPEN = 2,
+        STUCK_FAULT = 3
+    };
+
+pin out bit ready;
+pin out bit pump;
+pin out bit up;
+pin out bit down;
+pin out bit fault_stuck;
+
+variable int counter_actuation_loop = 0;
+
+
+pin in bit release_button "release button";
+pin in bit pressure "pressure switch of upwards chamber of piston";
+
+variable bit release "signals tool release is necessary (either by button or automatically)";
+variable int current_state_actuation_loop = IDLE "current state of actuaction-loop";
+variable int last_state_actuation_loop = IDLE "last state of actuaction-loop";
+
+
+
+author "Tim Stehling";
+license "GPL";
+function _;
+
+;;
+
+FUNCTION(_){
+	// position feedback loop
+	// reset fault condition by external signal
+	if(fault_reset) {
+		current_state_pos_feed_loop = UNDEFINED;
+		last_state_pos_feed_loop = UNDEFINED;
+		fault_pos = 0;
+    	counter_pos_feed_loop = 0;
+	}
+
+    switch (current_state_pos_feed_loop){
+		case UNDEFINED: // piston is between closed and opened position
+			status = 2;
+			fault_pos = 0;
+
+			if(ini_up == 1 && ini_down == 0) {
+    			current_state_pos_feed_loop = CLOSED;
+			}else if(ini_up == 0 && ini_down == 1) {
+    			current_state_pos_feed_loop = OPENED;
+			}else if(ini_up == 1 && ini_down == 1) {
+    			current_state_pos_feed_loop = SENSOR_FAULT;
+			}
+
+			if(counter_pos_feed_loop >= 100000) {
+				current_state_pos_feed_loop = TIMEOUT_FAULT;
+			}
+		break;
+
+		case CLOSED:
+			status = 0;
+
+			if(ini_up == 0) {
+				current_state_pos_feed_loop = UNDEFINED;
+			}
+		break;
+
+		case OPENED:
+			status = 1;
+
+			if(ini_down == 0) {
+				current_state_pos_feed_loop = UNDEFINED;
+			}
+		break;
+
+		case TIMEOUT_FAULT:
+			fault_pos = 1;
+
+		break;
+
+		case SENSOR_FAULT:
+			fault_pos = 1;
+		break;
+	}
+	// position feedback loop timeout in undefined
+	if (current_state_pos_feed_loop == UNDEFINED && current_state_pos_feed_loop == last_state_pos_feed_loop && machine_is_on) {
+    	counter_pos_feed_loop++;
+	} else {
+    	counter_pos_feed_loop = 0;
+	}
+
+	last_state_pos_feed_loop = current_state_pos_feed_loop;
+
+
+
+
+	// actuation loop
+	// reset fault condition by external signal
+	if(fault_reset) {
+		current_state_actuation_loop = IDLE;
+		last_state_actuation_loop = IDLE;
+    	fault_stuck = 0;
+    	counter_actuation_loop = 0;
+	}
+
+	// prevent hydraulics from doing anything in fault state
+	if (fault_pos) {
+    current_state_actuation_loop = IDLE;
+    pump = 0;
+    up = 0;
+    down = 0;
+	ready = 0;
+	}
+
+	release = release_button; // as long as now automatic toolchange is implemented
+	ready = !fault_pos && !fault_stuck; // because hal pins always need to be driven every loop -> is overwritten if not right
+	switch (current_state_actuation_loop){
+		case IDLE:
+			ready = !fault_pos && !fault_stuck; // 1 when no faults
+			pump = 0;
+			up = 0;
+			down = 0;
+
+			if(status != 0 && release == 0) {
+				current_state_actuation_loop = CLOSE;
+			}else if(release == 1) {
+				current_state_actuation_loop = OPEN;
+			}else if(pressure == 0 && machine_is_on && fault_pos == 0) {
+    			current_state_actuation_loop = CLOSE;
+			}
+
+		break;
+
+		case CLOSE:
+			ready = !fault_pos && !fault_stuck; // 1 when no faults
+			pump = 1;
+			up = 1;
+			down = 0;
+
+			if(counter_actuation_loop >= 100000) {
+    			current_state_actuation_loop = STUCK_FAULT;
+			}else if(release == 1) {
+    			current_state_actuation_loop = OPEN;
+			}else if(status == 0) {
+    			current_state_actuation_loop = IDLE;
+			}
+
+		break;
+
+		case OPEN:
+			ready = 0;
+			pump = 1;
+			up = 0;
+			down = 1;
+
+			if(release == 0) {
+				current_state_actuation_loop = CLOSE;
+			}
+		break;
+
+		case STUCK_FAULT:
+			fault_stuck = 1;
+			ready = 0;
+		break;
+	}
+	// actuation loop timeout in closing action -> piston is stuck or sensor defective
+	if (current_state_actuation_loop == CLOSE && current_state_actuation_loop == last_state_actuation_loop && machine_is_on) {
+    	counter_actuation_loop++;
+	} else {
+    	counter_actuation_loop = 0;
+	}
+
+	last_state_actuation_loop = current_state_actuation_loop;
+
+
+
+
+}
